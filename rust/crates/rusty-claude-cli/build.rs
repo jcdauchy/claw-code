@@ -17,16 +17,26 @@ fn command_output(program: &str, args: &[&str]) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn env_override(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty() && v != "unknown")
+}
+
 fn main() {
-    let git_sha =
-        command_output("git", &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let git_sha_short = command_output("git", &["rev-parse", "--short=12", "HEAD"])
+    let git_sha = env_override("CLAW_BUILD_GIT_SHA")
+        .or_else(|| command_output("git", &["rev-parse", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+    let git_sha_short = env_override("CLAW_BUILD_GIT_SHA")
+        .map(|sha| sha[..sha.len().min(12)].to_string())
+        .or_else(|| command_output("git", &["rev-parse", "--short=12", "HEAD"]))
         .or_else(|| git_sha.get(..git_sha.len().min(12)).map(str::to_string))
         .unwrap_or_else(|| "unknown".to_string());
     let git_dirty = command_output("git", &["status", "--porcelain"])
         .map(|status| (!status.trim().is_empty()).to_string())
         .unwrap_or_else(|| "false".to_string());
-    let git_branch = command_output("git", &["branch", "--show-current"])
+    let git_branch = env_override("CLAW_BUILD_GIT_BRANCH")
+        .or_else(|| command_output("git", &["branch", "--show-current"]))
         .unwrap_or_else(|| "unknown".to_string());
     let git_commit_date = command_output("git", &["show", "-s", "--format=%cI", "HEAD"])
         .unwrap_or_else(|| "unknown".to_string());

@@ -1,0 +1,62 @@
+# syntax=docker/dockerfile:1
+# Cross-compile claw for Windows (x86_64-pc-windows-gnu) via mingw-w64.
+#
+# Build context: rust/  (workspace root containing Cargo.toml + crates/)
+#
+# Usage — from repo root:
+#   bash scripts/build-windows.sh
+#
+# Or manually:
+#   docker build --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+#     -f rust/Dockerfile.windows -t claw-windows-builder rust/
+#   id=$(docker create claw-windows-builder)
+#   docker cp "$id:/claw.exe" dist/claw.exe && docker rm "$id"
+
+# ── builder ──────────────────────────────────────────────────────────────────
+FROM rust:1.91-bookworm AS builder
+
+# Git metadata forwarded from the host via --build-arg and picked up by build.rs
+# through the CLAW_BUILD_* env vars (env_override() falls back to git commands).
+ARG GIT_SHA=unknown
+ARG GIT_BRANCH=unknown
+ENV CLAW_BUILD_GIT_SHA=$GIT_SHA \
+    CLAW_BUILD_GIT_BRANCH=$GIT_BRANCH
+
+# mingw-w64 provides the Windows cross-linker (x86_64-w64-mingw32-gcc) and the
+# Win32 headers/import libraries needed for tokio/crossterm/rustyline on Windows.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Register the cross-compilation target with rustup.
+RUN rustup target add x86_64-pc-windows-gnu
+
+# Tell Cargo which linker to use for the Windows target.
+# rustup does not create ~/.cargo/ until the first cargo invocation, so we
+# must mkdir before appending to config.toml.
+RUN mkdir -p /root/.cargo && \
+    printf '[target.x86_64-pc-windows-gnu]\nlinker = "x86_64-w64-mingw32-gcc"\n' \
+    >> /root/.cargo/config.toml
+
+WORKDIR /build
+
+# Copy workspace manifest and lock file first so Cargo can fetch deps in a
+# separate Docker layer (avoids full refetch on source-only changes).
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+
+# Release build for Windows.
+# All crates use reqwest with rustls-tls (pure-Rust TLS) so no OpenSSL is
+# required; the entire dependency tree cross-compiles without C shims.
+RUN GIT_SHA="${GIT_SHA}" cargo build \
+    -p rusty-claude-cli \
+    --target x86_64-pc-windows-gnu \
+    --release
+
+# ── export stage: only the finished binary ────────────────────────────────────
+# Using scratch keeps the image tiny and makes it obvious the only content is
+# the binary.  docker cp works fine against scratch-based images.
+FROM scratch
+COPY --from=builder \
+    /build/target/x86_64-pc-windows-gnu/release/claw.exe \
+    /claw.exe
